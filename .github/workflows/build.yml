@@ -1,0 +1,52 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish self-contained app
+        shell: pwsh
+        run: |
+          $iss = Get-ChildItem -Recurse -Filter MagicPanel.iss | Select-Object -First 1
+          $proj = Get-ChildItem -Recurse -Filter MagicPanel.csproj | Where-Object { $_.FullName -notlike '*Tests*' } | Select-Object -First 1
+          if (-not $iss) { throw "installer/MagicPanel.iss was not found in the repository" }
+          if (-not $proj) { throw "MagicPanel.csproj was not found in the repository" }
+          $root = $iss.Directory.Parent.FullName
+          "ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ISS=$($iss.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          dotnet publish $proj.FullName -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o "$root\publish"
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+
+      - name: Smoke test - app starts and stays running
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "$env:ROOT\publish\MagicPanel.exe" -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) { throw "MagicPanel.exe exited early with code $($p.ExitCode)" }
+          Write-Host "MagicPanel.exe is running (PID $($p.Id))."
+          Stop-Process -Id $p.Id -Force
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "$env:ISS"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MagicPanel-Setup
+          path: ${{ env.ROOT }}/installer-output/MagicPanel-Setup.exe
